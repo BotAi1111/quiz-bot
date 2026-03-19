@@ -24,6 +24,7 @@ app.post('/', async (req, res) => {
           chatId,
           'Привет! Я бот для квиза 🚀\n\nЧтобы зарегистрироваться как капитан команды, отправь команду в формате:\n/register Team 1'
         );
+
       } else if (text.toLowerCase().startsWith('/register')) {
         const teamNameRaw = text.replace(/^\/register\s*/i, '').trim();
 
@@ -41,6 +42,7 @@ app.post('/', async (req, res) => {
             `Готово! Ты зарегистрирован как капитан команды ${teamName}.`
           );
         }
+
       } else if (text === '/me') {
         const teamName = captains[chatId];
 
@@ -52,10 +54,37 @@ app.post('/', async (req, res) => {
             'Ты пока не зарегистрирован. Используй команду:\n/register Team 1'
           );
         }
+
+      } else if (text.toLowerCase().startsWith('/answer')) {
+        const teamName = captains[chatId];
+
+        if (!teamName) {
+          await sendMessage(
+            chatId,
+            'Сначала зарегистрируйся:\n/register Team 1'
+          );
+        } else {
+          const answerText = text.replace(/^\/answer\s*/i, '').trim();
+
+          if (!answerText) {
+            await sendMessage(
+              chatId,
+              'Напиши ответ после команды. Пример:\n/answer Париж'
+            );
+          } else {
+            console.log(`Ответ от ${teamName}: ${answerText}`);
+
+            await sendMessage(
+              chatId,
+              `Ответ "${answerText}" принят от команды ${teamName} ✅`
+            );
+          }
+        }
+
       } else {
         await sendMessage(
           chatId,
-          'Я пока понимаю команды:\n/start\n/register Team 1\n/me'
+          'Я пока понимаю команды:\n/start\n/register Team 1\n/me\n/answer текст'
         );
       }
     }
