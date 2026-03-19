@@ -8,7 +8,7 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Твой Telegram chat_id
+// Организатор
 const ADMIN_CHAT_ID = '412726697';
 
 // Google Sheets
@@ -22,13 +22,9 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-// Хранилище в памяти
-const captains = {};          // chatId -> Team N
-const answers = {};           // question -> { Team N: "answer" }
-const scores = {};            // Team N -> points
-let currentQuestion = null;
-
-// Защита от повторной обработки update
+// Пока капитанов держим в памяти.
+// Следующим шагом можно тоже вынести их в таблицу.
+const captains = {};
 const processedUpdates = new Set();
 
 app.post('/', async (req, res) => {
@@ -46,243 +42,234 @@ app.post('/', async (req, res) => {
       processedUpdates.delete(oldest);
     }
 
-    if (update.message) {
-      const chatId = String(update.message.chat.id);
-      const text = (update.message.text || '').trim();
+    if (!update.message) {
+      return res.sendStatus(200);
+    }
 
-      console.log(`UPDATE ${updateId} | chat ${chatId} | text: ${text}`);
+    const chatId = String(update.message.chat.id);
+    const text = (update.message.text || '').trim();
 
-      if (text === '/start') {
-        if (isAdmin(chatId)) {
-          await sendMessage(
-            chatId,
-            'Привет! Я бот для квиза 🚀\n\nКоманды организатора:\n' +
-            '/open 1\n' +
-            '/current\n' +
-            '/close\n' +
-            '/results\n' +
-            '/results 1\n' +
-            '/score Team 1 1\n' +
-            '/setscore Team 1 5\n' +
-            '/teamscore Team 1\n' +
-            '/leaderboard\n' +
-            '/testsheet\n' +
-            '/id'
-          );
+    console.log(`UPDATE ${updateId} | chat ${chatId} | text: ${text}`);
+
+    if (text === '/start') {
+      if (isAdmin(chatId)) {
+        await sendMessage(
+          chatId,
+          'Привет! Я бот для квиза 🚀\n\nКоманды организатора:\n' +
+          '/open 1\n' +
+          '/current\n' +
+          '/close\n' +
+          '/results\n' +
+          '/results 1\n' +
+          '/leaderboard\n' +
+          '/testsheet\n' +
+          '/id'
+        );
+      } else {
+        await sendMessage(
+          chatId,
+          'Привет! Я бот для квиза 🚀\n\nКоманды капитана:\n' +
+          '/register Team 1\n' +
+          '/me\n' +
+          '/answer Париж'
+        );
+      }
+
+    } else if (text === '/id') {
+      await sendMessage(chatId, `Твой chat_id: ${chatId}`);
+
+    } else if (text === '/testsheet') {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        const rows = await getQuestions();
+        await sendMessage(chatId, `Нашёл ${rows.length} вопросов`);
+      }
+
+    } else if (text.toLowerCase().startsWith('/register')) {
+      const teamRaw = text.replace(/^\/register\s*/i, '').trim();
+
+      if (!teamRaw) {
+        await sendMessage(chatId, 'Пример:\n/register Team 1');
+      } else {
+        const team = normalizeTeamName(teamRaw);
+        captains[chatId] = team;
+
+        await ensureTeamScoreRow(team);
+
+        await sendMessage(chatId, `Ты капитан ${team} ✅`);
+      }
+
+    } else if (text === '/me') {
+      const team = captains[chatId];
+
+      if (!team) {
+        await sendMessage(chatId, 'Ты не зарегистрирован');
+      } else {
+        await sendMessage(chatId, `Ты капитан ${team} ✅`);
+      }
+
+    } else if (text.toLowerCase().startsWith('/open')) {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        const q = text.replace(/^\/open\s*/i, '').trim();
+
+        if (!q) {
+          await sendMessage(chatId, 'Пример:\n/open 1');
         } else {
-          await sendMessage(
-            chatId,
-            'Привет! Я бот для квиза 🚀\n\nКоманды капитана:\n' +
-            '/register Team 1\n' +
-            '/me\n' +
-            '/answer Париж'
-          );
-        }
+          await closeAllQuestions();
+          const ok = await setQuestionStatus(q, 'open');
 
-      } else if (text === '/id') {
-        await sendMessage(chatId, `Твой chat_id: ${chatId}`);
-
-      } else if (text === '/testsheet') {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          const data = await getQuestions();
-          console.log('SHEETS DATA:', data);
-          await sendMessage(chatId, `Нашёл ${data.length} вопросов`);
-        }
-
-      } else if (text.toLowerCase().startsWith('/register')) {
-        const teamRaw = text.replace(/^\/register\s*/i, '').trim();
-
-        if (!teamRaw) {
-          await sendMessage(chatId, 'Пример:\n/register Team 1');
-        } else {
-          const team = normalizeTeamName(teamRaw);
-          captains[chatId] = team;
-
-          if (!(team in scores)) {
-            scores[team] = 0;
-          }
-
-          await sendMessage(chatId, `Ты капитан ${team} ✅`);
-        }
-
-      } else if (text === '/me') {
-        const team = captains[chatId];
-
-        if (!team) {
-          await sendMessage(chatId, 'Ты не зарегистрирован');
-        } else {
-          await sendMessage(chatId, `Ты капитан ${team} ✅`);
-        }
-
-      } else if (text.toLowerCase().startsWith('/open')) {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          const q = text.replace(/^\/open\s*/i, '').trim();
-
-          if (!q) {
-            await sendMessage(chatId, 'Пример:\n/open 1');
+          if (!ok) {
+            await sendMessage(chatId, `Вопрос ${q} не найден в таблице Questions.`);
           } else {
-            currentQuestion = q;
-            answers[q] = answers[q] || {};
             await sendMessage(chatId, `Вопрос ${q} открыт`);
           }
         }
+      }
 
-      } else if (text === '/current') {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+    } else if (text === '/current') {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        const q = await getOpenQuestion();
+        if (!q) {
+          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
         } else {
-          await sendMessage(
-            chatId,
-            currentQuestion ? `Сейчас вопрос ${currentQuestion}` : 'Сейчас нет открытого вопроса.'
-          );
+          await sendMessage(chatId, `Сейчас открыт вопрос ${q.question_id}`);
         }
+      }
 
-      } else if (text === '/close') {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+    } else if (text === '/close') {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        const q = await getOpenQuestion();
+
+        if (!q) {
+          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
         } else {
-          if (!currentQuestion) {
-            await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
-          } else {
-            const q = currentQuestion;
-            currentQuestion = null;
-            await sendMessage(chatId, `Вопрос ${q} закрыт`);
-          }
+          await setQuestionStatus(q.question_id, 'closed');
+          await sendMessage(chatId, `Вопрос ${q.question_id} закрыт`);
         }
+      }
 
-      } else if (text.toLowerCase().startsWith('/answer')) {
-        const team = captains[chatId];
+    } else if (text.toLowerCase().startsWith('/answer')) {
+      const team = captains[chatId];
 
-        if (!team) {
-          await sendMessage(chatId, 'Сначала зарегистрируйся:\n/register Team 1');
-        } else if (!currentQuestion) {
+      if (!team) {
+        await sendMessage(chatId, 'Сначала зарегистрируйся:\n/register Team 1');
+      } else {
+        const openQuestion = await getOpenQuestion();
+
+        if (!openQuestion) {
           await sendMessage(chatId, 'Сейчас нет открытого вопроса. Подожди, пока организаторы откроют вопрос.');
         } else {
-          const ans = text.replace(/^\/answer\s*/i, '').trim();
+          const ansRaw = text.replace(/^\/answer\s*/i, '').trim();
 
-          if (!ans) {
+          if (!ansRaw) {
             await sendMessage(chatId, 'Пример:\n/answer Париж');
           } else {
-            answers[currentQuestion] = answers[currentQuestion] || {};
+            const already = await hasTeamAnswered(openQuestion.question_id, team);
 
-            if (answers[currentQuestion][team]) {
-              await sendMessage(chatId, `Команда ${team} уже отвечала на вопрос ${currentQuestion}.`);
+            if (already) {
+              await sendMessage(chatId, `Команда ${team} уже отвечала на вопрос ${openQuestion.question_id}.`);
             } else {
-              answers[currentQuestion][team] = ans;
-              console.log(`Q${currentQuestion} | ${team}: ${ans}`);
-              await sendMessage(chatId, `Ответ "${ans}" принят от команды ${team} на вопрос ${currentQuestion} ✅`);
-            }
-          }
-        }
+              const result = checkAnswer(
+                ansRaw,
+                openQuestion.accepted_answers,
+                openQuestion.question_type,
+                Number(openQuestion.points || 0)
+              );
 
-      } else if (text.toLowerCase().startsWith('/results')) {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          let q = text.replace(/^\/results\s*/i, '').trim();
-          if (!q) q = currentQuestion;
+              await appendAnswerRow({
+                questionId: openQuestion.question_id,
+                team,
+                answerRaw: ansRaw,
+                answerNormalized: result.normalizedAnswer,
+                isCorrect: result.isCorrect,
+                pointsAwarded: result.pointsAwarded
+              });
 
-          if (!q) {
-            await sendMessage(chatId, 'Нет активного вопроса');
-          } else {
-            const data = answers[q];
-
-            if (!data || Object.keys(data).length === 0) {
-              await sendMessage(chatId, `Нет ответов на вопрос ${q}`);
-            } else {
-              let msg = `Ответы на вопрос ${q}:\n\n`;
-              for (const team of sortTeams(Object.keys(data))) {
-                msg += `• ${team}: ${data[team]}\n`;
+              if (result.pointsAwarded > 0) {
+                await addScore(team, result.pointsAwarded);
               }
-              await sendMessage(chatId, msg.trim());
+
+              console.log(
+                `Q${openQuestion.question_id} | ${team}: ${ansRaw} | correct=${result.isCorrect} | points=${result.pointsAwarded}`
+              );
+
+              if (result.isCorrect) {
+                await sendMessage(
+                  chatId,
+                  `Ответ "${ansRaw}" принят от команды ${team} ✅\nПравильно! Начислено ${result.pointsAwarded} балл(ов).`
+                );
+              } else {
+                await sendMessage(
+                  chatId,
+                  `Ответ "${ansRaw}" принят от команды ${team} ✅\nК сожалению, это неправильный ответ.`
+                );
+              }
             }
           }
         }
+      }
 
-      } else if (text.toLowerCase().startsWith('/score')) {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          const parsed = parseScoreCommand(text, '/score');
-
-          if (!parsed.ok) {
-            await sendMessage(chatId, 'Пример:\n/score Team 1 1');
-          } else {
-            const { team, points } = parsed;
-
-            if (!(team in scores)) {
-              scores[team] = 0;
-            }
-
-            scores[team] += points;
-
-            await sendMessage(
-              chatId,
-              `Команде ${team} ${points >= 0 ? 'добавлено' : 'снято'} ${Math.abs(points)} балл(ов).\nТекущий счёт: ${scores[team]}`
-            );
-          }
-        }
-
-      } else if (text.toLowerCase().startsWith('/setscore')) {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          const parsed = parseScoreCommand(text, '/setscore');
-
-          if (!parsed.ok) {
-            await sendMessage(chatId, 'Пример:\n/setscore Team 1 5');
-          } else {
-            const { team, points } = parsed;
-            scores[team] = points;
-            await sendMessage(chatId, `Счёт команды ${team} установлен на ${points}`);
-          }
-        }
-
-      } else if (text.toLowerCase().startsWith('/teamscore')) {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          const teamRaw = text.replace(/^\/teamscore\s*/i, '').trim();
-
-          if (!teamRaw) {
-            await sendMessage(chatId, 'Пример:\n/teamscore Team 1');
-          } else {
-            const team = normalizeTeamName(teamRaw);
-            const value = scores[team] || 0;
-            await sendMessage(chatId, `${team}: ${value} балл(ов)`);
-          }
-        }
-
-      } else if (text === '/leaderboard') {
-        if (!isAdmin(chatId)) {
-          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-        } else {
-          await sendMessage(chatId, buildLeaderboard(scores));
-        }
-
+    } else if (text.toLowerCase().startsWith('/results')) {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
       } else {
-        if (isAdmin(chatId)) {
-          await sendMessage(
-            chatId,
-            'Команды организатора:\n' +
-            '/open 1\n' +
-            '/current\n' +
-            '/close\n' +
-            '/results\n' +
-            '/results 1\n' +
-            '/score Team 1 1\n' +
-            '/setscore Team 1 5\n' +
-            '/teamscore Team 1\n' +
-            '/leaderboard\n' +
-            '/testsheet'
-          );
-        } else {
-          await sendMessage(chatId, 'Я понимаю команды:\n/register Team 1\n/me\n/answer текст');
+        let qid = text.replace(/^\/results\s*/i, '').trim();
+
+        if (!qid) {
+          const openQuestion = await getOpenQuestion();
+          qid = openQuestion ? openQuestion.question_id : '';
         }
+
+        if (!qid) {
+          await sendMessage(chatId, 'Нет активного вопроса');
+        } else {
+          const rows = await getAnswersByQuestion(qid);
+
+          if (rows.length === 0) {
+            await sendMessage(chatId, `Нет ответов на вопрос ${qid}`);
+          } else {
+            let msg = `Ответы на вопрос ${qid}:\n\n`;
+
+            for (const row of rows) {
+              const correctness = row.isCorrect === 'TRUE' ? '✅' : '❌';
+              msg += `• ${row.team}: ${row.answerRaw} ${correctness} (${row.pointsAwarded})\n`;
+            }
+
+            await sendMessage(chatId, msg.trim());
+          }
+        }
+      }
+
+    } else if (text === '/leaderboard') {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        const board = await getLeaderboard();
+        await sendMessage(chatId, board);
+      }
+
+    } else {
+      if (isAdmin(chatId)) {
+        await sendMessage(
+          chatId,
+          'Команды организатора:\n' +
+          '/open 1\n' +
+          '/current\n' +
+          '/close\n' +
+          '/results\n' +
+          '/results 1\n' +
+          '/leaderboard\n' +
+          '/testsheet'
+        );
+      } else {
+        await sendMessage(chatId, 'Я понимаю команды:\n/register Team 1\n/me\n/answer текст');
       }
     }
 
@@ -298,59 +285,59 @@ function isAdmin(chatId) {
 }
 
 function normalizeTeamName(value) {
-  const cleaned = value.trim().replace(/\s+/g, ' ');
+  const cleaned = String(value || '').trim().replace(/\s+/g, ' ');
   const match = cleaned.match(/^team\s*(\d+)$/i);
   if (match) return `Team ${match[1]}`;
   return cleaned;
 }
 
-function parseScoreCommand(text, commandName) {
-  const raw = text.replace(new RegExp(`^\\${commandName}\\s*`, 'i'), '').trim();
-  const match = raw.match(/^(team\s+\d+)\s+(-?\d+)$/i);
+function normalizeText(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/ё/g, 'е')
+    .replace(/Ё/g, 'Е')
+    .toLowerCase();
+}
 
-  if (!match) {
-    return { ok: false };
+function normalizeNumber(value) {
+  const raw = String(value || '').trim().replace(',', '.');
+  const num = Number(raw);
+  return Number.isNaN(num) ? null : String(num);
+}
+
+function checkAnswer(answerRaw, acceptedAnswersRaw, questionType, points) {
+  const type = String(questionType || 'text').trim().toLowerCase();
+  const acceptedList = String(acceptedAnswersRaw || '')
+    .split('|')
+    .map(v => v.trim())
+    .filter(Boolean);
+
+  if (type === 'number') {
+    const normalizedAnswer = normalizeNumber(answerRaw);
+    const normalizedAccepted = acceptedList
+      .map(v => normalizeNumber(v))
+      .filter(v => v !== null);
+
+    const isCorrect =
+      normalizedAnswer !== null && normalizedAccepted.includes(normalizedAnswer);
+
+    return {
+      normalizedAnswer: normalizedAnswer ?? '',
+      isCorrect,
+      pointsAwarded: isCorrect ? points : 0
+    };
   }
+
+  const normalizedAnswer = normalizeText(answerRaw);
+  const normalizedAccepted = acceptedList.map(v => normalizeText(v));
+  const isCorrect = normalizedAccepted.includes(normalizedAnswer);
 
   return {
-    ok: true,
-    team: normalizeTeamName(match[1]),
-    points: Number(match[2])
+    normalizedAnswer,
+    isCorrect,
+    pointsAwarded: isCorrect ? points : 0
   };
-}
-
-function sortTeams(teamNames) {
-  return [...teamNames].sort((a, b) => {
-    const aMatch = a.match(/^Team\s+(\d+)$/i);
-    const bMatch = b.match(/^Team\s+(\d+)$/i);
-
-    if (aMatch && bMatch) {
-      return Number(aMatch[1]) - Number(bMatch[1]);
-    }
-
-    return a.localeCompare(b, 'ru');
-  });
-}
-
-function buildLeaderboard(scoreMap) {
-  const teams = Object.keys(scoreMap);
-
-  if (teams.length === 0) {
-    return 'Пока нет ни одной команды с баллами.';
-  }
-
-  const sorted = teams.sort((a, b) => {
-    const diff = (scoreMap[b] || 0) - (scoreMap[a] || 0);
-    if (diff !== 0) return diff;
-    return a.localeCompare(b, 'ru');
-  });
-
-  let msg = '🏆 Таблица результатов:\n\n';
-  sorted.forEach((team, index) => {
-    msg += `${index + 1}. ${team} — ${scoreMap[team] || 0}\n`;
-  });
-
-  return msg.trim();
 }
 
 async function getQuestions() {
@@ -359,7 +346,214 @@ async function getQuestions() {
     range: 'Questions!A2:F'
   });
 
-  return res.data.values || [];
+  const rows = res.data.values || [];
+
+  return rows.map(row => ({
+    question_id: String(row[0] || '').trim(),
+    question_type: String(row[1] || '').trim(),
+    question_text: String(row[2] || '').trim(),
+    accepted_answers: String(row[3] || '').trim(),
+    points: String(row[4] || '').trim(),
+    status: String(row[5] || '').trim()
+  }));
+}
+
+async function getOpenQuestion() {
+  const rows = await getQuestions();
+  return rows.find(row => row.status.toLowerCase() === 'open') || null;
+}
+
+async function setQuestionStatus(questionId, newStatus) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Questions!A2:F'
+  });
+
+  const rows = res.data.values || [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowQuestionId = String(rows[i][0] || '').trim();
+
+    if (rowQuestionId === String(questionId).trim()) {
+      const targetRow = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Questions!F${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[newStatus]]
+        }
+      });
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function closeAllQuestions() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Questions!A2:F'
+  });
+
+  const rows = res.data.values || [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const status = String(rows[i][5] || '').trim().toLowerCase();
+
+    if (status === 'open') {
+      const targetRow = i + 2;
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Questions!F${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [['closed']]
+        }
+      });
+    }
+  }
+}
+
+async function appendAnswerRow({ questionId, team, answerRaw, answerNormalized, isCorrect, pointsAwarded }) {
+  const timestamp = new Date().toISOString();
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Answers!A:G',
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: {
+      values: [[
+        timestamp,
+        questionId,
+        team,
+        answerRaw,
+        answerNormalized,
+        isCorrect ? 'TRUE' : 'FALSE',
+        pointsAwarded
+      ]]
+    }
+  });
+}
+
+async function getAnswersByQuestion(questionId) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Answers!A2:G'
+  });
+
+  const rows = res.data.values || [];
+
+  return rows
+    .map(row => ({
+      timestamp: row[0] || '',
+      questionId: row[1] || '',
+      team: row[2] || '',
+      answerRaw: row[3] || '',
+      answerNormalized: row[4] || '',
+      isCorrect: row[5] || '',
+      pointsAwarded: row[6] || '0'
+    }))
+    .filter(row => String(row.questionId).trim() === String(questionId).trim())
+    .sort((a, b) => a.team.localeCompare(b.team, 'en', { numeric: true }));
+}
+
+async function hasTeamAnswered(questionId, team) {
+  const rows = await getAnswersByQuestion(questionId);
+  return rows.some(row => String(row.team).trim() === String(team).trim());
+}
+
+async function ensureTeamScoreRow(team) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Scores!A2:B'
+  });
+
+  const rows = res.data.values || [];
+  const exists = rows.some(row => String(row[0] || '').trim() === String(team).trim());
+
+  if (!exists) {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Scores!A:B',
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: {
+        values: [[team, 0]]
+      }
+    });
+  }
+}
+
+async function addScore(team, delta) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Scores!A2:B'
+  });
+
+  const rows = res.data.values || [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const rowTeam = String(rows[i][0] || '').trim();
+
+    if (rowTeam === String(team).trim()) {
+      const current = Number(rows[i][1] || 0);
+      const updated = current + delta;
+      const targetRow = i + 2;
+
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Scores!B${targetRow}`,
+        valueInputOption: 'RAW',
+        requestBody: {
+          values: [[updated]]
+        }
+      });
+      return;
+    }
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Scores!A:B',
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: {
+      values: [[team, delta]]
+    }
+  });
+}
+
+async function getLeaderboard() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Scores!A2:B'
+  });
+
+  const rows = res.data.values || [];
+
+  if (rows.length === 0) {
+    return 'Пока нет ни одной команды с баллами.';
+  }
+
+  const data = rows.map(row => ({
+    team: String(row[0] || '').trim(),
+    points: Number(row[1] || 0)
+  }));
+
+  data.sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    return a.team.localeCompare(b.team, 'en', { numeric: true });
+  });
+
+  let msg = '🏆 Таблица результатов:\n\n';
+  data.forEach((item, index) => {
+    msg += `${index + 1}. ${item.team} — ${item.points}\n`;
+  });
+
+  return msg.trim();
 }
 
 async function sendMessage(chatId, text) {
