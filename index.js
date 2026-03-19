@@ -7,9 +7,10 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Простое временное хранилище в памяти.
-// После перезапуска сервиса данные очистятся.
+// Временное хранилище в памяти
 const captains = {};
+const answers = {};
+let currentQuestion = null;
 
 app.post('/', async (req, res) => {
   try {
@@ -22,7 +23,7 @@ app.post('/', async (req, res) => {
       if (text === '/start') {
         await sendMessage(
           chatId,
-          'Привет! Я бот для квиза 🚀\n\nЧтобы зарегистрироваться как капитан команды, отправь команду в формате:\n/register Team 1'
+          'Привет! Я бот для квиза 🚀\n\nКоманды:\n/register Team 1\n/me\n/open 1\n/current\n/answer Париж\n/close'
         );
 
       } else if (text.toLowerCase().startsWith('/register')) {
@@ -55,6 +56,41 @@ app.post('/', async (req, res) => {
           );
         }
 
+      } else if (text.toLowerCase().startsWith('/open')) {
+        const questionRaw = text.replace(/^\/open\s*/i, '').trim();
+
+        if (!questionRaw) {
+          await sendMessage(
+            chatId,
+            'Нужно указать номер вопроса. Пример:\n/open 1'
+          );
+        } else {
+          currentQuestion = questionRaw;
+          answers[currentQuestion] = answers[currentQuestion] || {};
+
+          await sendMessage(
+            chatId,
+            `Открыт вопрос ${currentQuestion}. Теперь команды могут присылать ответы.`
+          );
+        }
+
+      } else if (text === '/current') {
+        if (currentQuestion) {
+          await sendMessage(chatId, `Сейчас открыт вопрос ${currentQuestion}.`);
+        } else {
+          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+        }
+
+      } else if (text === '/close') {
+        if (currentQuestion) {
+          const closedQuestion = currentQuestion;
+          currentQuestion = null;
+
+          await sendMessage(chatId, `Вопрос ${closedQuestion} закрыт. Приём ответов остановлен.`);
+        } else {
+          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+        }
+
       } else if (text.toLowerCase().startsWith('/answer')) {
         const teamName = captains[chatId];
 
@@ -62,6 +98,11 @@ app.post('/', async (req, res) => {
           await sendMessage(
             chatId,
             'Сначала зарегистрируйся:\n/register Team 1'
+          );
+        } else if (!currentQuestion) {
+          await sendMessage(
+            chatId,
+            'Сейчас нет открытого вопроса. Подожди, пока ведущая откроет вопрос.'
           );
         } else {
           const answerText = text.replace(/^\/answer\s*/i, '').trim();
@@ -72,19 +113,30 @@ app.post('/', async (req, res) => {
               'Напиши ответ после команды. Пример:\n/answer Париж'
             );
           } else {
-            console.log(`Ответ от ${teamName}: ${answerText}`);
+            answers[currentQuestion] = answers[currentQuestion] || {};
 
-            await sendMessage(
-              chatId,
-              `Ответ "${answerText}" принят от команды ${teamName} ✅`
-            );
+            if (answers[currentQuestion][teamName]) {
+              await sendMessage(
+                chatId,
+                `Команда ${teamName} уже отвечала на вопрос ${currentQuestion}.`
+              );
+            } else {
+              answers[currentQuestion][teamName] = answerText;
+
+              console.log(`Вопрос ${currentQuestion} | Ответ от ${teamName}: ${answerText}`);
+
+              await sendMessage(
+                chatId,
+                `Ответ "${answerText}" принят от команды ${teamName} на вопрос ${currentQuestion} ✅`
+              );
+            }
           }
         }
 
       } else {
         await sendMessage(
           chatId,
-          'Я пока понимаю команды:\n/start\n/register Team 1\n/me\n/answer текст'
+          'Я понимаю команды:\n/start\n/register Team 1\n/me\n/open 1\n/current\n/answer текст\n/close'
         );
       }
     }
