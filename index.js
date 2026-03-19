@@ -23,8 +23,11 @@ app.post('/', async (req, res) => {
       if (text === '/start') {
         await sendMessage(
           chatId,
-          'Привет! Я бот для квиза 🚀\n\nКоманды:\n/register Team 1\n/me\n/open 1\n/current\n/answer Париж\n/close'
+          'Привет! Я бот для квиза 🚀\n\nКоманды:\n/register Team 1\n/me\n/id\n/open 1\n/current\n/answer Париж\n/close'
         );
+
+      } else if (text === '/id') {
+        await sendMessage(chatId, `Твой chat_id: ${chatId}`);
 
       } else if (text.toLowerCase().startsWith('/register')) {
         const teamNameRaw = text.replace(/^\/register\s*/i, '').trim();
@@ -136,7 +139,7 @@ app.post('/', async (req, res) => {
       } else {
         await sendMessage(
           chatId,
-          'Я понимаю команды:\n/start\n/register Team 1\n/me\n/open 1\n/current\n/answer текст\n/close'
+          'Я понимаю команды:\n/start\n/register Team 1\n/me\n/id\n/open 1\n/current\n/answer текст\n/close'
         );
       }
     }
