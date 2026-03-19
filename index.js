@@ -13,7 +13,7 @@ const ADMIN_CHAT_ID = '412726697';
 
 // Google Sheets
 const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-const SPREADSHEET_ID = 1ZwHmSpZSGe5oyo1UL3LHE9eRw2j9qyrPsyJ8A1rUmkE;
+const SPREADSHEET_ID = '1ZwHmSpZSGe5oyo1UL3LHE9eRw2j9qyrPsyJ8A1rUmkE';
 
 const auth = new google.auth.GoogleAuth({
   credentials: GOOGLE_CREDENTIALS,
