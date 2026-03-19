@@ -7,6 +7,9 @@ app.use(express.json());
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
+// Твой Telegram chat_id
+const ADMIN_CHAT_ID = '412726697';
+
 // Временное хранилище в памяти
 const captains = {};
 const answers = {};
@@ -23,7 +26,7 @@ app.post('/', async (req, res) => {
       if (text === '/start') {
         await sendMessage(
           chatId,
-          'Привет! Я бот для квиза 🚀\n\nКоманды:\n/register Team 1\n/me\n/id\n/open 1\n/current\n/answer Париж\n/close'
+          'Привет! Я бот для квиза 🚀\n\nКоманды для капитанов:\n/register Team 1\n/me\n/answer Париж'
         );
 
       } else if (text === '/id') {
@@ -60,38 +63,50 @@ app.post('/', async (req, res) => {
         }
 
       } else if (text.toLowerCase().startsWith('/open')) {
-        const questionRaw = text.replace(/^\/open\s*/i, '').trim();
-
-        if (!questionRaw) {
-          await sendMessage(
-            chatId,
-            'Нужно указать номер вопроса. Пример:\n/open 1'
-          );
+        if (!isAdmin(chatId)) {
+          await sendMessage(chatId, 'Эта команда доступна только ведущей.');
         } else {
-          currentQuestion = questionRaw;
-          answers[currentQuestion] = answers[currentQuestion] || {};
+          const questionRaw = text.replace(/^\/open\s*/i, '').trim();
 
-          await sendMessage(
-            chatId,
-            `Открыт вопрос ${currentQuestion}. Теперь команды могут присылать ответы.`
-          );
+          if (!questionRaw) {
+            await sendMessage(
+              chatId,
+              'Нужно указать номер вопроса. Пример:\n/open 1'
+            );
+          } else {
+            currentQuestion = questionRaw;
+            answers[currentQuestion] = answers[currentQuestion] || {};
+
+            await sendMessage(
+              chatId,
+              `Открыт вопрос ${currentQuestion}. Теперь команды могут присылать ответы.`
+            );
+          }
         }
 
       } else if (text === '/current') {
-        if (currentQuestion) {
-          await sendMessage(chatId, `Сейчас открыт вопрос ${currentQuestion}.`);
+        if (!isAdmin(chatId)) {
+          await sendMessage(chatId, 'Эта команда доступна только ведущей.');
         } else {
-          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+          if (currentQuestion) {
+            await sendMessage(chatId, `Сейчас открыт вопрос ${currentQuestion}.`);
+          } else {
+            await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+          }
         }
 
       } else if (text === '/close') {
-        if (currentQuestion) {
-          const closedQuestion = currentQuestion;
-          currentQuestion = null;
-
-          await sendMessage(chatId, `Вопрос ${closedQuestion} закрыт. Приём ответов остановлен.`);
+        if (!isAdmin(chatId)) {
+          await sendMessage(chatId, 'Эта команда доступна только ведущей.');
         } else {
-          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+          if (currentQuestion) {
+            const closedQuestion = currentQuestion;
+            currentQuestion = null;
+
+            await sendMessage(chatId, `Вопрос ${closedQuestion} закрыт. Приём ответов остановлен.`);
+          } else {
+            await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
+          }
         }
 
       } else if (text.toLowerCase().startsWith('/answer')) {
@@ -137,10 +152,17 @@ app.post('/', async (req, res) => {
         }
 
       } else {
-        await sendMessage(
-          chatId,
-          'Я понимаю команды:\n/start\n/register Team 1\n/me\n/id\n/open 1\n/current\n/answer текст\n/close'
-        );
+        if (isAdmin(chatId)) {
+          await sendMessage(
+            chatId,
+            'Команды ведущей:\n/open 1\n/current\n/close\n\nКоманды капитанов:\n/register Team 1\n/me\n/answer текст'
+          );
+        } else {
+          await sendMessage(
+            chatId,
+            'Я понимаю команды:\n/register Team 1\n/me\n/answer текст'
+          );
+        }
       }
     }
 
@@ -150,6 +172,10 @@ app.post('/', async (req, res) => {
     res.sendStatus(200);
   }
 });
+
+function isAdmin(chatId) {
+  return String(chatId) === String(ADMIN_CHAT_ID);
+}
 
 function normalizeTeamName(value) {
   const cleaned = value.trim().replace(/\s+/g, ' ');
