@@ -1,5 +1,6 @@
 const express = require('express');
 const axios = require('axios');
+const { google } = require('googleapis');
 
 const app = express();
 app.use(express.json());
@@ -9,6 +10,17 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
 // Твой Telegram chat_id
 const ADMIN_CHAT_ID = '412726697';
+
+// Google Sheets
+const GOOGLE_CREDENTIALS = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+const SPREADSHEET_ID = 1ZwHmSpZSGe5oyo1UL3LHE9eRw2j9qyrPsyJ8A1rUmkE;
+
+const auth = new google.auth.GoogleAuth({
+  credentials: GOOGLE_CREDENTIALS,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets']
+});
+
+const sheets = google.sheets({ version: 'v4', auth });
 
 // Хранилище в памяти
 const captains = {};          // chatId -> Team N
@@ -40,7 +52,6 @@ app.post('/', async (req, res) => {
 
       console.log(`UPDATE ${updateId} | chat ${chatId} | text: ${text}`);
 
-      // /start
       if (text === '/start') {
         if (isAdmin(chatId)) {
           await sendMessage(
@@ -53,8 +64,9 @@ app.post('/', async (req, res) => {
             '/results 1\n' +
             '/score Team 1 1\n' +
             '/setscore Team 1 5\n' +
-            '/teamscores\n' +
             '/teamscore Team 1\n' +
+            '/leaderboard\n' +
+            '/testsheet\n' +
             '/id'
           );
         } else {
@@ -67,11 +79,18 @@ app.post('/', async (req, res) => {
           );
         }
 
-      // /id
       } else if (text === '/id') {
         await sendMessage(chatId, `Твой chat_id: ${chatId}`);
 
-      // /register Team 1
+      } else if (text === '/testsheet') {
+        if (!isAdmin(chatId)) {
+          await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+        } else {
+          const data = await getQuestions();
+          console.log('SHEETS DATA:', data);
+          await sendMessage(chatId, `Нашёл ${data.length} вопросов`);
+        }
+
       } else if (text.toLowerCase().startsWith('/register')) {
         const teamRaw = text.replace(/^\/register\s*/i, '').trim();
 
@@ -88,7 +107,6 @@ app.post('/', async (req, res) => {
           await sendMessage(chatId, `Ты капитан ${team} ✅`);
         }
 
-      // /me
       } else if (text === '/me') {
         const team = captains[chatId];
 
@@ -98,7 +116,6 @@ app.post('/', async (req, res) => {
           await sendMessage(chatId, `Ты капитан ${team} ✅`);
         }
 
-      // /open 1
       } else if (text.toLowerCase().startsWith('/open')) {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -114,7 +131,6 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /current
       } else if (text === '/current') {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -125,7 +141,6 @@ app.post('/', async (req, res) => {
           );
         }
 
-      // /close
       } else if (text === '/close') {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -139,7 +154,6 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /answer ...
       } else if (text.toLowerCase().startsWith('/answer')) {
         const team = captains[chatId];
 
@@ -165,7 +179,6 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /results или /results 1
       } else if (text.toLowerCase().startsWith('/results')) {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -190,7 +203,6 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /score Team 1 1
       } else if (text.toLowerCase().startsWith('/score')) {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -215,7 +227,6 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /setscore Team 1 5
       } else if (text.toLowerCase().startsWith('/setscore')) {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -227,15 +238,10 @@ app.post('/', async (req, res) => {
           } else {
             const { team, points } = parsed;
             scores[team] = points;
-
-            await sendMessage(
-              chatId,
-              `Счёт команды ${team} установлен на ${points}`
-            );
+            await sendMessage(chatId, `Счёт команды ${team} установлен на ${points}`);
           }
         }
 
-      // /teamscore Team 1
       } else if (text.toLowerCase().startsWith('/teamscore')) {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -251,13 +257,11 @@ app.post('/', async (req, res) => {
           }
         }
 
-      // /teamscores
-      } else if (text === '/teamscores' || text === '/leaderboard') {
+      } else if (text === '/leaderboard') {
         if (!isAdmin(chatId)) {
           await sendMessage(chatId, 'Эта команда доступна только организаторам.');
         } else {
-          const msg = buildLeaderboard(scores);
-          await sendMessage(chatId, msg);
+          await sendMessage(chatId, buildLeaderboard(scores));
         }
 
       } else {
@@ -272,14 +276,12 @@ app.post('/', async (req, res) => {
             '/results 1\n' +
             '/score Team 1 1\n' +
             '/setscore Team 1 5\n' +
-            '/teamscores\n' +
-            '/teamscore Team 1'
+            '/teamscore Team 1\n' +
+            '/leaderboard\n' +
+            '/testsheet'
           );
         } else {
-          await sendMessage(
-            chatId,
-            'Я понимаю команды:\n/register Team 1\n/me\n/answer текст'
-          );
+          await sendMessage(chatId, 'Я понимаю команды:\n/register Team 1\n/me\n/answer текст');
         }
       }
     }
@@ -304,8 +306,8 @@ function normalizeTeamName(value) {
 
 function parseScoreCommand(text, commandName) {
   const raw = text.replace(new RegExp(`^\\${commandName}\\s*`, 'i'), '').trim();
-
   const match = raw.match(/^(team\s+\d+)\s+(-?\d+)$/i);
+
   if (!match) {
     return { ok: false };
   }
@@ -349,6 +351,15 @@ function buildLeaderboard(scoreMap) {
   });
 
   return msg.trim();
+}
+
+async function getQuestions() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Questions!A2:F'
+  });
+
+  return res.data.values || [];
 }
 
 async function sendMessage(chatId, text) {
