@@ -25,6 +25,9 @@ const sheets = google.sheets({ version: 'v4', auth });
 // Защита от повторной обработки update
 const processedUpdates = new Set();
 
+// Временные состояния UI
+const userStates = {}; // chatId -> { mode: 'register_team_number' | 'answer_text' | 'open_question_number' | 'results_question_number' }
+
 app.post('/', async (req, res) => {
   try {
     const update = req.body;
@@ -40,6 +43,11 @@ app.post('/', async (req, res) => {
       processedUpdates.delete(oldest);
     }
 
+    if (update.callback_query) {
+      await handleCallbackQuery(update.callback_query);
+      return res.sendStatus(200);
+    }
+
     if (!update.message) {
       return res.sendStatus(200);
     }
@@ -49,256 +57,7 @@ app.post('/', async (req, res) => {
 
     console.log(`UPDATE ${updateId} | chat ${chatId} | text: ${text}`);
 
-    if (text === '/start') {
-      if (isAdmin(chatId)) {
-        await sendMessage(
-          chatId,
-          'Привет! Я бот для квиза 🚀\n\nКоманды организатора:\n' +
-            '/open 1\n' +
-            '/current\n' +
-            '/close\n' +
-            '/results\n' +
-            '/results 1\n' +
-            '/leaderboard\n' +
-            '/resetteams\n' +
-            '/testsheet\n' +
-            '/id'
-        );
-      } else {
-        await sendMessage(
-          chatId,
-          'Привет! Я бот для квиза 🚀\n\nКоманды капитана:\n' +
-            '/register Team 1\n' +
-            '/me\n' +
-            '/answer Париж'
-        );
-      }
-
-    } else if (text === '/id') {
-      await sendMessage(chatId, `Твой chat_id: ${chatId}`);
-
-    } else if (text === '/testsheet') {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        const rows = await getQuestions();
-        await sendMessage(chatId, `Нашёл ${rows.length} вопросов`);
-      }
-
-    } else if (text.toLowerCase().startsWith('/register')) {
-      const teamRaw = text.replace(/^\/register\s*/i, '').trim();
-
-      if (!teamRaw) {
-        await sendMessage(chatId, 'Пример:\n/register Team 1');
-      } else {
-        const team = normalizeTeamName(teamRaw);
-
-        const existingTeam = await getTeamByChatId(chatId);
-        if (existingTeam) {
-          if (existingTeam === team) {
-            await sendMessage(chatId, `Ты уже капитан ${team} ✅`);
-          } else {
-            await sendMessage(
-              chatId,
-              `Ты уже зарегистрирован как капитан ${existingTeam}.\nНельзя быть капитаном сразу в двух командах.`
-            );
-          }
-          return res.sendStatus(200);
-        }
-
-        const captainsForTeam = await getCaptainsByTeam(team);
-        if (captainsForTeam.length >= 2) {
-          await sendMessage(chatId, `У команды ${team} уже есть 2 капитана. Добавить ещё одного нельзя.`);
-          return res.sendStatus(200);
-        }
-
-        await appendTeamCaptain(chatId, team);
-        await ensureTeamScoreRow(team);
-
-        await sendMessage(chatId, `Ты капитан ${team} ✅`);
-      }
-
-    } else if (text === '/me') {
-      const team = await getTeamByChatId(chatId);
-
-      if (!team) {
-        await sendMessage(chatId, 'Ты не зарегистрирован');
-      } else {
-        await sendMessage(chatId, `Ты капитан ${team} ✅`);
-      }
-
-    } else if (text.toLowerCase().startsWith('/open')) {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        const q = text.replace(/^\/open\s*/i, '').trim();
-
-        if (!q) {
-          await sendMessage(chatId, 'Пример:\n/open 1');
-        } else {
-          await closeAllQuestions();
-          const ok = await setQuestionStatus(q, 'open');
-
-          if (!ok) {
-            await sendMessage(chatId, `Вопрос ${q} не найден в таблице Questions.`);
-          } else {
-            await sendMessage(chatId, `Вопрос ${q} открыт`);
-          }
-        }
-      }
-
-    } else if (text === '/current') {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        const q = await getOpenQuestion();
-        if (!q) {
-          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
-        } else {
-          await sendMessage(chatId, `Сейчас открыт вопрос ${q.question_id}`);
-        }
-      }
-
-    } else if (text === '/close') {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        const q = await getOpenQuestion();
-
-        if (!q) {
-          await sendMessage(chatId, 'Сейчас нет открытого вопроса.');
-        } else {
-          await setQuestionStatus(q.question_id, 'closed');
-          await sendMessage(chatId, `Вопрос ${q.question_id} закрыт`);
-        }
-      }
-
-    } else if (text === '/resetteams') {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        await clearTeamsSheet();
-        await sendMessage(chatId, 'Все привязки капитанов ко всем командам сброшены.');
-      }
-
-    } else if (text.toLowerCase().startsWith('/answer')) {
-      const team = await getTeamByChatId(chatId);
-
-      if (!team) {
-        await sendMessage(chatId, 'Сначала зарегистрируйся:\n/register Team 1');
-      } else {
-        const openQuestion = await getOpenQuestion();
-
-        if (!openQuestion) {
-          await sendMessage(chatId, 'Сейчас нет открытого вопроса. Подожди, пока организаторы откроют вопрос.');
-        } else {
-          const ansRaw = text.replace(/^\/answer\s*/i, '').trim();
-
-          if (!ansRaw) {
-            await sendMessage(chatId, 'Пример:\n/answer Париж');
-          } else {
-            const already = await hasTeamAnswered(openQuestion.question_id, team);
-
-            if (already) {
-              await sendMessage(chatId, `Команда ${team} уже отвечала на вопрос ${openQuestion.question_id}.`);
-            } else {
-              const result = checkAnswer(
-                ansRaw,
-                openQuestion.accepted_answers,
-                openQuestion.question_type,
-                Number(openQuestion.points || 0)
-              );
-
-              await appendAnswerRow({
-                questionId: openQuestion.question_id,
-                team,
-                answerRaw: ansRaw,
-                answerNormalized: result.normalizedAnswer,
-                isCorrect: result.isCorrect,
-                pointsAwarded: result.pointsAwarded
-              });
-
-              if (result.pointsAwarded > 0) {
-                await addScore(team, result.pointsAwarded);
-              }
-
-              console.log(
-                `Q${openQuestion.question_id} | ${team}: ${ansRaw} | correct=${result.isCorrect} | points=${result.pointsAwarded}`
-              );
-
-              if (result.isCorrect) {
-                await sendMessage(
-                  chatId,
-                  `Ответ "${ansRaw}" принят от команды ${team} ✅\nПравильно! Начислено ${result.pointsAwarded} балл(ов).`
-                );
-              } else {
-                await sendMessage(
-                  chatId,
-                  `Ответ "${ansRaw}" принят от команды ${team} ✅\nК сожалению, это неправильный ответ.`
-                );
-              }
-            }
-          }
-        }
-      }
-
-    } else if (text.toLowerCase().startsWith('/results')) {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        let qid = text.replace(/^\/results\s*/i, '').trim();
-
-        if (!qid) {
-          const openQuestion = await getOpenQuestion();
-          qid = openQuestion ? openQuestion.question_id : '';
-        }
-
-        if (!qid) {
-          await sendMessage(chatId, 'Нет активного вопроса');
-        } else {
-          const rows = await getAnswersByQuestion(qid);
-
-          if (rows.length === 0) {
-            await sendMessage(chatId, `Нет ответов на вопрос ${qid}`);
-          } else {
-            let msg = `Ответы на вопрос ${qid}:\n\n`;
-
-            for (const row of rows) {
-              const correctness = row.isCorrect === 'TRUE' ? '✅' : '❌';
-              msg += `• ${row.team}: ${row.answerRaw} ${correctness} (${row.pointsAwarded})\n`;
-            }
-
-            await sendMessage(chatId, msg.trim());
-          }
-        }
-      }
-
-    } else if (text === '/leaderboard') {
-      if (!isAdmin(chatId)) {
-        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
-      } else {
-        const board = await getLeaderboard();
-        await sendMessage(chatId, board);
-      }
-
-    } else {
-      if (isAdmin(chatId)) {
-        await sendMessage(
-          chatId,
-          'Команды организатора:\n' +
-            '/open 1\n' +
-            '/current\n' +
-            '/close\n' +
-            '/results\n' +
-            '/results 1\n' +
-            '/leaderboard\n' +
-            '/resetteams\n' +
-            '/testsheet'
-        );
-      } else {
-        await sendMessage(chatId, 'Я понимаю команды:\n/register Team 1\n/me\n/answer текст');
-      }
-    }
+    await handleIncomingMessage(chatId, text);
 
     res.sendStatus(200);
   } catch (e) {
@@ -306,6 +65,514 @@ app.post('/', async (req, res) => {
     res.sendStatus(200);
   }
 });
+
+async function handleIncomingMessage(chatId, text) {
+  if (text === '/start') {
+    await sendWelcome(chatId);
+    return;
+  }
+
+  if (text === '/menu') {
+    await sendMenu(chatId, 'Выбери действие:');
+    return;
+  }
+
+  if (text === '/id') {
+    await sendMessage(chatId, `Твой chat_id: ${chatId}`);
+    return;
+  }
+
+  // Сначала обрабатываем состояние, если пользователь что-то должен ввести
+  const state = userStates[chatId];
+  if (state && !text.startsWith('/')) {
+    await handleStateInput(chatId, text, state);
+    return;
+  }
+
+  // Ручные команды тоже оставляем
+  if (text.toLowerCase().startsWith('/register')) {
+    const teamRaw = text.replace(/^\/register\s*/i, '').trim();
+    if (!teamRaw) {
+      await sendMessage(chatId, 'Пример:\n/register Team 1');
+      return;
+    }
+    await performRegister(chatId, teamRaw);
+    return;
+  }
+
+  if (text === '/me') {
+    await performMe(chatId);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('/open')) {
+    if (!isAdmin(chatId)) {
+      await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      return;
+    }
+
+    const q = text.replace(/^\/open\s*/i, '').trim();
+    if (!q) {
+      await sendMessage(chatId, 'Пример:\n/open 1');
+      return;
+    }
+
+    await performOpen(chatId, q);
+    return;
+  }
+
+  if (text === '/current') {
+    await performCurrent(chatId);
+    return;
+  }
+
+  if (text === '/close') {
+    await performClose(chatId);
+    return;
+  }
+
+  if (text === '/resetteams') {
+    await performResetTeams(chatId);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('/answer')) {
+    const ansRaw = text.replace(/^\/answer\s*/i, '').trim();
+    if (!ansRaw) {
+      await sendMessage(chatId, 'Пример:\n/answer Париж');
+      return;
+    }
+    await performAnswer(chatId, ansRaw);
+    return;
+  }
+
+  if (text.toLowerCase().startsWith('/results')) {
+    if (!isAdmin(chatId)) {
+      await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      return;
+    }
+
+    let qid = text.replace(/^\/results\s*/i, '').trim();
+    if (!qid) {
+      const openQuestion = await getOpenQuestion();
+      qid = openQuestion ? openQuestion.question_id : '';
+    }
+
+    await performResults(chatId, qid);
+    return;
+  }
+
+  if (text === '/leaderboard') {
+    await performLeaderboard(chatId);
+    return;
+  }
+
+  if (text === '/testsheet') {
+    if (!isAdmin(chatId)) {
+      await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      return;
+    }
+
+    const rows = await getQuestions();
+    await sendMessage(chatId, `Нашёл ${rows.length} вопросов`);
+    return;
+  }
+
+  await sendMenu(chatId, 'Не понимаю команду. Выбери действие:');
+}
+
+async function handleCallbackQuery(callbackQuery) {
+  const callbackId = callbackQuery.id;
+  const chatId = String(callbackQuery.message.chat.id);
+  const data = String(callbackQuery.data || '');
+
+  console.log(`CALLBACK | chat ${chatId} | data: ${data}`);
+
+  await answerCallbackQuery(callbackId);
+
+  if (data === 'menu_main') {
+    await clearState(chatId);
+    await sendMenu(chatId, 'Выбери действие:');
+    return;
+  }
+
+  // Участник
+  if (data === 'user_register') {
+    await setState(chatId, 'register_team_number');
+    await sendMessage(chatId, 'Введи номер команды, например:\n1');
+    return;
+  }
+
+  if (data === 'user_me') {
+    await clearState(chatId);
+    await performMe(chatId);
+    return;
+  }
+
+  if (data === 'user_answer') {
+    await setState(chatId, 'answer_text');
+    await sendMessage(chatId, 'Введи свой ответ:');
+    return;
+  }
+
+  // Организатор
+  if (data === 'admin_open') {
+    if (!isAdmin(chatId)) {
+      await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      return;
+    }
+    await setState(chatId, 'open_question_number');
+    await sendMessage(chatId, 'Введи номер вопроса, например:\n1');
+    return;
+  }
+
+  if (data === 'admin_current') {
+    await clearState(chatId);
+    await performCurrent(chatId);
+    return;
+  }
+
+  if (data === 'admin_close') {
+    await clearState(chatId);
+    await performClose(chatId);
+    return;
+  }
+
+  if (data === 'admin_results_current') {
+    await clearState(chatId);
+    const openQuestion = await getOpenQuestion();
+    const qid = openQuestion ? openQuestion.question_id : '';
+    await performResults(chatId, qid);
+    return;
+  }
+
+  if (data === 'admin_results_number') {
+    await setState(chatId, 'results_question_number');
+    await sendMessage(chatId, 'Введи номер вопроса для просмотра результатов:');
+    return;
+  }
+
+  if (data === 'admin_leaderboard') {
+    await clearState(chatId);
+    await performLeaderboard(chatId);
+    return;
+  }
+
+  if (data === 'admin_resetteams') {
+    await clearState(chatId);
+    await performResetTeams(chatId);
+    return;
+  }
+
+  await sendMenu(chatId, 'Выбери действие:');
+}
+
+async function handleStateInput(chatId, text, state) {
+  if (state.mode === 'register_team_number') {
+    await clearState(chatId);
+    await performRegister(chatId, `Team ${text}`);
+    return;
+  }
+
+  if (state.mode === 'answer_text') {
+    await clearState(chatId);
+    await performAnswer(chatId, text);
+    return;
+  }
+
+  if (state.mode === 'open_question_number') {
+    await clearState(chatId);
+    await performOpen(chatId, text);
+    return;
+  }
+
+  if (state.mode === 'results_question_number') {
+    await clearState(chatId);
+    await performResults(chatId, text);
+    return;
+  }
+
+  await clearState(chatId);
+  await sendMenu(chatId, 'Выбери действие:');
+}
+
+async function performRegister(chatId, teamRaw) {
+  const team = normalizeTeamName(teamRaw);
+
+  const existingTeam = await getTeamByChatId(chatId);
+  if (existingTeam) {
+    if (existingTeam === team) {
+      await sendMessage(chatId, `Ты уже капитан ${team} ✅`, getMenuMarkup(chatId));
+    } else {
+      await sendMessage(
+        chatId,
+        `Ты уже зарегистрирован как капитан ${existingTeam}.\nНельзя быть капитаном сразу в двух командах.`,
+        getMenuMarkup(chatId)
+      );
+    }
+    return;
+  }
+
+  const captainsForTeam = await getCaptainsByTeam(team);
+  if (captainsForTeam.length >= 2) {
+    await sendMessage(chatId, `У команды ${team} уже есть 2 капитана. Добавить ещё одного нельзя.`, getMenuMarkup(chatId));
+    return;
+  }
+
+  await appendTeamCaptain(chatId, team);
+  await ensureTeamScoreRow(team);
+
+  await sendMessage(chatId, `Ты капитан ${team} ✅`, getMenuMarkup(chatId));
+}
+
+async function performMe(chatId) {
+  const team = await getTeamByChatId(chatId);
+
+  if (!team) {
+    await sendMessage(chatId, 'Ты не зарегистрирован', getMenuMarkup(chatId));
+  } else {
+    await sendMessage(chatId, `Ты капитан ${team} ✅`, getMenuMarkup(chatId));
+  }
+}
+
+async function performOpen(chatId, q) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const questionId = String(q || '').trim();
+  if (!questionId) {
+    await sendMessage(chatId, 'Пример:\n/open 1', getMenuMarkup(chatId));
+    return;
+  }
+
+  await closeAllQuestions();
+  const ok = await setQuestionStatus(questionId, 'open');
+
+  if (!ok) {
+    await sendMessage(chatId, `Вопрос ${questionId} не найден в таблице Questions.`, getMenuMarkup(chatId));
+  } else {
+    await sendMessage(chatId, `Вопрос ${questionId} открыт`, getMenuMarkup(chatId));
+  }
+}
+
+async function performCurrent(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const q = await getOpenQuestion();
+  if (!q) {
+    await sendMessage(chatId, 'Сейчас нет открытого вопроса.', getMenuMarkup(chatId));
+  } else {
+    await sendMessage(chatId, `Сейчас открыт вопрос ${q.question_id}`, getMenuMarkup(chatId));
+  }
+}
+
+async function performClose(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const q = await getOpenQuestion();
+
+  if (!q) {
+    await sendMessage(chatId, 'Сейчас нет открытого вопроса.', getMenuMarkup(chatId));
+  } else {
+    await setQuestionStatus(q.question_id, 'closed');
+    await sendMessage(chatId, `Вопрос ${q.question_id} закрыт`, getMenuMarkup(chatId));
+  }
+}
+
+async function performResetTeams(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  await clearTeamsSheet();
+  await sendMessage(chatId, 'Все привязки капитанов ко всем командам сброшены.', getMenuMarkup(chatId));
+}
+
+async function performAnswer(chatId, ansRaw) {
+  const team = await getTeamByChatId(chatId);
+
+  if (!team) {
+    await sendMessage(chatId, 'Сначала зарегистрируйся:\n/register Team 1', getMenuMarkup(chatId));
+    return;
+  }
+
+  const openQuestion = await getOpenQuestion();
+
+  if (!openQuestion) {
+    await sendMessage(chatId, 'Сейчас нет открытого вопроса. Подожди, пока организаторы откроют вопрос.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const answerText = String(ansRaw || '').trim();
+  if (!answerText) {
+    await sendMessage(chatId, 'Введи ответ ещё раз.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const already = await hasTeamAnswered(openQuestion.question_id, team);
+
+  if (already) {
+    await sendMessage(chatId, `Команда ${team} уже отвечала на вопрос ${openQuestion.question_id}.`, getMenuMarkup(chatId));
+    return;
+  }
+
+  const result = checkAnswer(
+    answerText,
+    openQuestion.accepted_answers,
+    openQuestion.question_type,
+    Number(openQuestion.points || 0)
+  );
+
+  await appendAnswerRow({
+    questionId: openQuestion.question_id,
+    team,
+    answerRaw: answerText,
+    answerNormalized: result.normalizedAnswer,
+    isCorrect: result.isCorrect,
+    pointsAwarded: result.pointsAwarded
+  });
+
+  if (result.pointsAwarded > 0) {
+    await addScore(team, result.pointsAwarded);
+  }
+
+  console.log(
+    `Q${openQuestion.question_id} | ${team}: ${answerText} | correct=${result.isCorrect} | points=${result.pointsAwarded}`
+  );
+
+  if (result.isCorrect) {
+    await sendMessage(
+      chatId,
+      `Ответ "${answerText}" принят от команды ${team} ✅\nПравильно! Начислено ${result.pointsAwarded} балл(ов).`,
+      getMenuMarkup(chatId)
+    );
+  } else {
+    await sendMessage(
+      chatId,
+      `Ответ "${answerText}" принят от команды ${team} ✅\nК сожалению, это неправильный ответ.`,
+      getMenuMarkup(chatId)
+    );
+  }
+}
+
+async function performResults(chatId, qid) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const questionId = String(qid || '').trim();
+
+  if (!questionId) {
+    await sendMessage(chatId, 'Нет активного вопроса', getMenuMarkup(chatId));
+    return;
+  }
+
+  const rows = await getAnswersByQuestion(questionId);
+
+  if (rows.length === 0) {
+    await sendMessage(chatId, `Нет ответов на вопрос ${questionId}`, getMenuMarkup(chatId));
+  } else {
+    let msg = `Ответы на вопрос ${questionId}:\n\n`;
+
+    for (const row of rows) {
+      const correctness = row.isCorrect === 'TRUE' ? '✅' : '❌';
+      msg += `• ${row.team}: ${row.answerRaw} ${correctness} (${row.pointsAwarded})\n`;
+    }
+
+    await sendMessage(chatId, msg.trim(), getMenuMarkup(chatId));
+  }
+}
+
+async function performLeaderboard(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const board = await getLeaderboard();
+  await sendMessage(chatId, board, getMenuMarkup(chatId));
+}
+
+async function sendWelcome(chatId) {
+  if (isAdmin(chatId)) {
+    await sendMessage(
+      chatId,
+      'Привет! Я бот для квиза 🚀\nНажми кнопку ниже, чтобы открыть меню организатора.',
+      getMenuMarkup(chatId)
+    );
+  } else {
+    await sendMessage(
+      chatId,
+      'Привет! Я бот для квиза 🚀\nНажми кнопку ниже, чтобы открыть меню участника.',
+      getMenuMarkup(chatId)
+    );
+  }
+}
+
+async function sendMenu(chatId, text) {
+  await sendMessage(chatId, text, getMenuMarkup(chatId));
+}
+
+function getMenuMarkup(chatId) {
+  if (isAdmin(chatId)) {
+    return {
+      inline_keyboard: [
+        [
+          { text: 'Открыть вопрос', callback_data: 'admin_open' },
+          { text: 'Текущий вопрос', callback_data: 'admin_current' }
+        ],
+        [
+          { text: 'Закрыть вопрос', callback_data: 'admin_close' },
+          { text: 'Результаты (текущий)', callback_data: 'admin_results_current' }
+        ],
+        [
+          { text: 'Результаты по номеру', callback_data: 'admin_results_number' },
+          { text: 'Таблица лидеров', callback_data: 'admin_leaderboard' }
+        ],
+        [
+          { text: 'Сбросить капитанов', callback_data: 'admin_resetteams' }
+        ]
+      ]
+    };
+  }
+
+  return {
+    inline_keyboard: [
+      [
+        { text: 'Зарегистрироваться', callback_data: 'user_register' },
+        { text: 'Моя команда', callback_data: 'user_me' }
+      ],
+      [
+        { text: 'Ответить', callback_data: 'user_answer' }
+      ]
+    ]
+  };
+}
+
+async function setState(chatId, mode) {
+  userStates[String(chatId)] = { mode };
+}
+
+async function clearState(chatId) {
+  delete userStates[String(chatId)];
+}
+
+async function answerCallbackQuery(callbackQueryId, text = '') {
+  await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, {
+    callback_query_id: callbackQueryId,
+    text
+  });
+}
 
 function isAdmin(chatId) {
   return String(chatId) === String(ADMIN_CHAT_ID);
@@ -631,11 +898,17 @@ async function clearTeamsSheet() {
   });
 }
 
-async function sendMessage(chatId, text) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, {
+async function sendMessage(chatId, text, replyMarkup = null) {
+  const payload = {
     chat_id: chatId,
     text
-  });
+  };
+
+  if (replyMarkup) {
+    payload.reply_markup = replyMarkup;
+  }
+
+  await axios.post(`${TELEGRAM_API}/sendMessage`, payload);
 }
 
 const PORT = process.env.PORT || 3000;
