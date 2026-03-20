@@ -22,9 +22,7 @@ const auth = new google.auth.GoogleAuth({
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-// Пока капитанов держим в памяти.
-// Следующим шагом можно тоже вынести их в таблицу.
-const captains = {};
+// Защита от повторной обработки update
 const processedUpdates = new Set();
 
 app.post('/', async (req, res) => {
@@ -56,22 +54,23 @@ app.post('/', async (req, res) => {
         await sendMessage(
           chatId,
           'Привет! Я бот для квиза 🚀\n\nКоманды организатора:\n' +
-          '/open 1\n' +
-          '/current\n' +
-          '/close\n' +
-          '/results\n' +
-          '/results 1\n' +
-          '/leaderboard\n' +
-          '/testsheet\n' +
-          '/id'
+            '/open 1\n' +
+            '/current\n' +
+            '/close\n' +
+            '/results\n' +
+            '/results 1\n' +
+            '/leaderboard\n' +
+            '/resetteams\n' +
+            '/testsheet\n' +
+            '/id'
         );
       } else {
         await sendMessage(
           chatId,
           'Привет! Я бот для квиза 🚀\n\nКоманды капитана:\n' +
-          '/register Team 1\n' +
-          '/me\n' +
-          '/answer Париж'
+            '/register Team 1\n' +
+            '/me\n' +
+            '/answer Париж'
         );
       }
 
@@ -93,15 +92,34 @@ app.post('/', async (req, res) => {
         await sendMessage(chatId, 'Пример:\n/register Team 1');
       } else {
         const team = normalizeTeamName(teamRaw);
-        captains[chatId] = team;
 
+        const existingTeam = await getTeamByChatId(chatId);
+        if (existingTeam) {
+          if (existingTeam === team) {
+            await sendMessage(chatId, `Ты уже капитан ${team} ✅`);
+          } else {
+            await sendMessage(
+              chatId,
+              `Ты уже зарегистрирован как капитан ${existingTeam}.\nНельзя быть капитаном сразу в двух командах.`
+            );
+          }
+          return res.sendStatus(200);
+        }
+
+        const captainsForTeam = await getCaptainsByTeam(team);
+        if (captainsForTeam.length >= 2) {
+          await sendMessage(chatId, `У команды ${team} уже есть 2 капитана. Добавить ещё одного нельзя.`);
+          return res.sendStatus(200);
+        }
+
+        await appendTeamCaptain(chatId, team);
         await ensureTeamScoreRow(team);
 
         await sendMessage(chatId, `Ты капитан ${team} ✅`);
       }
 
     } else if (text === '/me') {
-      const team = captains[chatId];
+      const team = await getTeamByChatId(chatId);
 
       if (!team) {
         await sendMessage(chatId, 'Ты не зарегистрирован');
@@ -155,8 +173,16 @@ app.post('/', async (req, res) => {
         }
       }
 
+    } else if (text === '/resetteams') {
+      if (!isAdmin(chatId)) {
+        await sendMessage(chatId, 'Эта команда доступна только организаторам.');
+      } else {
+        await clearTeamsSheet();
+        await sendMessage(chatId, 'Все привязки капитанов ко всем командам сброшены.');
+      }
+
     } else if (text.toLowerCase().startsWith('/answer')) {
-      const team = captains[chatId];
+      const team = await getTeamByChatId(chatId);
 
       if (!team) {
         await sendMessage(chatId, 'Сначала зарегистрируйся:\n/register Team 1');
@@ -260,13 +286,14 @@ app.post('/', async (req, res) => {
         await sendMessage(
           chatId,
           'Команды организатора:\n' +
-          '/open 1\n' +
-          '/current\n' +
-          '/close\n' +
-          '/results\n' +
-          '/results 1\n' +
-          '/leaderboard\n' +
-          '/testsheet'
+            '/open 1\n' +
+            '/current\n' +
+            '/close\n' +
+            '/results\n' +
+            '/results 1\n' +
+            '/leaderboard\n' +
+            '/resetteams\n' +
+            '/testsheet'
         );
       } else {
         await sendMessage(chatId, 'Я понимаю команды:\n/register Team 1\n/me\n/answer текст');
@@ -554,6 +581,54 @@ async function getLeaderboard() {
   });
 
   return msg.trim();
+}
+
+async function getTeamsRows() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Teams!A2:C'
+  });
+
+  const rows = res.data.values || [];
+
+  return rows.map((row, index) => ({
+    rowIndex: index + 2,
+    chat_id: String(row[0] || '').trim(),
+    team: String(row[1] || '').trim(),
+    added_at: String(row[2] || '').trim()
+  }));
+}
+
+async function getTeamByChatId(chatId) {
+  const rows = await getTeamsRows();
+  const found = rows.find(row => String(row.chat_id) === String(chatId));
+  return found ? found.team : null;
+}
+
+async function getCaptainsByTeam(team) {
+  const rows = await getTeamsRows();
+  return rows.filter(row => String(row.team).trim() === String(team).trim());
+}
+
+async function appendTeamCaptain(chatId, team) {
+  const timestamp = new Date().toISOString();
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Teams!A:C',
+    valueInputOption: 'RAW',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: {
+      values: [[chatId, team, timestamp]]
+    }
+  });
+}
+
+async function clearTeamsSheet() {
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Teams!A2:C'
+  });
 }
 
 async function sendMessage(chatId, text) {
