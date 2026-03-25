@@ -26,7 +26,7 @@ const sheets = google.sheets({ version: 'v4', auth });
 const processedUpdates = new Set();
 
 // Временные состояния UI
-const userStates = {}; // chatId -> { mode: 'register_team_number' | 'answer_text' | 'open_question_number' | 'results_question_number' }
+const userStates = {}; // chatId -> { mode: ... }
 
 app.post('/', async (req, res) => {
   try {
@@ -82,14 +82,12 @@ async function handleIncomingMessage(chatId, text) {
     return;
   }
 
-  // Сначала обрабатываем состояние, если пользователь что-то должен ввести
   const state = userStates[chatId];
   if (state && !text.startsWith('/')) {
     await handleStateInput(chatId, text, state);
     return;
   }
 
-  // Ручные команды тоже оставляем
   if (text.toLowerCase().startsWith('/register')) {
     const teamRaw = text.replace(/^\/register\s*/i, '').trim();
     if (!teamRaw) {
@@ -133,6 +131,16 @@ async function handleIncomingMessage(chatId, text) {
 
   if (text === '/resetteams') {
     await performResetTeams(chatId);
+    return;
+  }
+
+  if (text === '/resetanswers') {
+    await performResetAnswers(chatId);
+    return;
+  }
+
+  if (text === '/teams') {
+    await performTeams(chatId);
     return;
   }
 
@@ -196,7 +204,6 @@ async function handleCallbackQuery(callbackQuery) {
     return;
   }
 
-  // Участник
   if (data === 'user_register') {
     await setState(chatId, 'register_team_number');
     await sendMessage(chatId, 'Введи номер команды, например:\n1');
@@ -215,7 +222,6 @@ async function handleCallbackQuery(callbackQuery) {
     return;
   }
 
-  // Организатор
   if (data === 'admin_open') {
     if (!isAdmin(chatId)) {
       await sendMessage(chatId, 'Эта команда доступна только организаторам.');
@@ -261,6 +267,18 @@ async function handleCallbackQuery(callbackQuery) {
   if (data === 'admin_resetteams') {
     await clearState(chatId);
     await performResetTeams(chatId);
+    return;
+  }
+
+  if (data === 'admin_resetanswers') {
+    await clearState(chatId);
+    await performResetAnswers(chatId);
+    return;
+  }
+
+  if (data === 'admin_teams') {
+    await clearState(chatId);
+    await performTeams(chatId);
     return;
   }
 
@@ -381,10 +399,39 @@ async function performClose(chatId) {
 
   if (!q) {
     await sendMessage(chatId, 'Сейчас нет открытого вопроса.', getMenuMarkup(chatId));
-  } else {
-    await setQuestionStatus(q.question_id, 'closed');
-    await sendMessage(chatId, `Вопрос ${q.question_id} закрыт`, getMenuMarkup(chatId));
+    return;
   }
+
+  await setQuestionStatus(q.question_id, 'closed');
+
+  const firstCorrectAnswer = getFirstAcceptedAnswer(q.accepted_answers);
+  const results = await getAnswersByQuestion(q.question_id);
+
+  // Уведомляем капитанов команд, которые отвечали
+  for (const row of results) {
+    const captains = await getCaptainsByTeam(row.team);
+
+    for (const captain of captains) {
+      const msg =
+        `Вопрос закрыт.\n` +
+        `Ваш ответ: ${row.answerRaw}\n` +
+        `Результат: ${row.isCorrect === 'TRUE' ? 'правильно' : 'неправильно'}\n` +
+        `Начислено: ${row.pointsAwarded} балл(ов)`;
+
+      try {
+        await sendMessage(captain.chat_id, msg, getMenuMarkup(captain.chat_id));
+      } catch (err) {
+        console.error(`Не удалось отправить уведомление chat_id=${captain.chat_id}`, err?.message || err);
+      }
+    }
+  }
+
+  const closeMessage =
+    `Вопрос ${q.question_id} закрыт\n\n` +
+    `Вопрос:\n${q.question_text}\n\n` +
+    `Правильный ответ:\n${firstCorrectAnswer}`;
+
+  await sendMessage(chatId, closeMessage, getMenuMarkup(chatId));
 }
 
 async function performResetTeams(chatId) {
@@ -395,6 +442,17 @@ async function performResetTeams(chatId) {
 
   await clearTeamsSheet();
   await sendMessage(chatId, 'Все привязки капитанов ко всем командам сброшены.', getMenuMarkup(chatId));
+}
+
+async function performResetAnswers(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  await clearAnswersSheet();
+  await clearScoresSheet();
+  await sendMessage(chatId, 'Все ответы и баллы сброшены.', getMenuMarkup(chatId));
 }
 
 async function performAnswer(chatId, ansRaw) {
@@ -408,7 +466,7 @@ async function performAnswer(chatId, ansRaw) {
   const openQuestion = await getOpenQuestion();
 
   if (!openQuestion) {
-    await sendMessage(chatId, 'Сейчас нет открытого вопроса. Подожди, пока организаторы откроют вопрос.', getMenuMarkup(chatId));
+    await sendMessage(chatId, 'Ответы больше не принимаются', getMenuMarkup(chatId));
     return;
   }
 
@@ -449,19 +507,7 @@ async function performAnswer(chatId, ansRaw) {
     `Q${openQuestion.question_id} | ${team}: ${answerText} | correct=${result.isCorrect} | points=${result.pointsAwarded}`
   );
 
-  if (result.isCorrect) {
-    await sendMessage(
-      chatId,
-      `Ответ "${answerText}" принят от команды ${team} ✅\nПравильно! Начислено ${result.pointsAwarded} балл(ов).`,
-      getMenuMarkup(chatId)
-    );
-  } else {
-    await sendMessage(
-      chatId,
-      `Ответ "${answerText}" принят от команды ${team} ✅\nК сожалению, это неправильный ответ.`,
-      getMenuMarkup(chatId)
-    );
-  }
+  await sendMessage(chatId, 'Ответ принят', getMenuMarkup(chatId));
 }
 
 async function performResults(chatId, qid) {
@@ -503,6 +549,37 @@ async function performLeaderboard(chatId) {
   await sendMessage(chatId, board, getMenuMarkup(chatId));
 }
 
+async function performTeams(chatId) {
+  if (!isAdmin(chatId)) {
+    await sendMessage(chatId, 'Эта команда доступна только организаторам.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const teamsRows = await getTeamsRows();
+
+  if (teamsRows.length === 0) {
+    await sendMessage(chatId, 'Пока нет зарегистрированных капитанов.', getMenuMarkup(chatId));
+    return;
+  }
+
+  const grouped = {};
+  for (const row of teamsRows) {
+    if (!grouped[row.team]) grouped[row.team] = 0;
+    grouped[row.team] += 1;
+  }
+
+  const sortedTeams = Object.keys(grouped).sort((a, b) =>
+    a.localeCompare(b, 'en', { numeric: true })
+  );
+
+  let msg = 'Команды:\n\n';
+  for (const team of sortedTeams) {
+    msg += `• ${team} — ${grouped[team]} капитан(а)\n`;
+  }
+
+  await sendMessage(chatId, msg.trim(), getMenuMarkup(chatId));
+}
+
 async function sendWelcome(chatId) {
   if (isAdmin(chatId)) {
     await sendMessage(
@@ -540,7 +617,11 @@ function getMenuMarkup(chatId) {
           { text: 'Таблица лидеров', callback_data: 'admin_leaderboard' }
         ],
         [
+          { text: 'Команды', callback_data: 'admin_teams' },
           { text: 'Сбросить капитанов', callback_data: 'admin_resetteams' }
+        ],
+        [
+          { text: 'Сбросить ответы и баллы', callback_data: 'admin_resetanswers' }
         ]
       ]
     };
@@ -598,6 +679,13 @@ function normalizeNumber(value) {
   const raw = String(value || '').trim().replace(',', '.');
   const num = Number(raw);
   return Number.isNaN(num) ? null : String(num);
+}
+
+function getFirstAcceptedAnswer(acceptedAnswersRaw) {
+  return String(acceptedAnswersRaw || '')
+    .split('|')
+    .map(v => v.trim())
+    .filter(Boolean)[0] || '—';
 }
 
 function checkAnswer(answerRaw, acceptedAnswersRaw, questionType, points) {
@@ -895,6 +983,20 @@ async function clearTeamsSheet() {
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SPREADSHEET_ID,
     range: 'Teams!A2:C'
+  });
+}
+
+async function clearAnswersSheet() {
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Answers!A2:G'
+  });
+}
+
+async function clearScoresSheet() {
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Scores!A2:B'
   });
 }
 
